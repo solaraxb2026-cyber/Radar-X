@@ -1,0 +1,10 @@
+{
+  "name": "SensorRadar",
+  "description": "Privacy-friendly sensor fusion human presence estimator with animated radar visualization and live confidence modulation.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
