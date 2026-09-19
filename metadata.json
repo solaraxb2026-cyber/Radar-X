@@ -1,8 +1,10 @@
 {
   "name": "SensorRadar",
-  "description": "Privacy-friendly sensor fusion human presence estimator with animated radar visualization and live confidence modulation.",
+  "description": "Sensor-fusion human and animal presence detection system combining Camera ML, ultrasonic acoustic sonar, WiFi RTT/disturbance, BLE, IMU, and compass-synced radar UI.",
   "requestFramePermissions": [
-    "microphone"
+    "camera",
+    "microphone",
+    "geolocation"
   ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

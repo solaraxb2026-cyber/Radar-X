@@ -3,6 +3,34 @@
 class RadarAudioEngine {
   private ctx: AudioContext | null = null;
   private lastPingTime = 0;
+  private isMuted = false;
+
+  public setMuted(muted: boolean): void {
+    this.isMuted = muted;
+  }
+
+  public playRadarTick(confidence: number): void {
+    if (this.isMuted) return;
+    this.playSonarPing(confidence);
+  }
+
+  public playPingSound(freq = 880): void {
+    if (this.isMuted) return;
+    try {
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.15);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.16);
+    } catch {}
+  }
 
   private getContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -78,6 +106,99 @@ class RadarAudioEngine {
 
       osc.start();
       osc.stop(ctx.currentTime + 0.24);
+    } catch {}
+  }
+
+  public playBlipAlert() {
+    this.playAlertBeep();
+  }
+
+  public playPing(freq = 880) {
+    this.playPingSound(freq);
+  }
+
+  public playTargetLocked() {
+    if (this.isMuted) return;
+    try {
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      // Precision lock two-tone rapid beep
+      [1046.5, 1318.5].forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, t + idx * 0.07);
+        gain.gain.setValueAtTime(0.0001, t + idx * 0.07);
+        gain.gain.linearRampToValueAtTime(0.09, t + idx * 0.07 + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + idx * 0.07 + 0.14);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t + idx * 0.07);
+        osc.stop(t + idx * 0.07 + 0.15);
+      });
+    } catch {}
+  }
+
+  public playCountdownTick() {
+    if (this.isMuted) return;
+    try {
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(950, ctx.currentTime);
+      gain.gain.setValueAtTime(0.04, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.05);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.06);
+    } catch {}
+  }
+
+  public playCalibrationStepChime() {
+    if (this.isMuted) return;
+    try {
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      [523.25, 659.25, 783.99].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, t + i * 0.08);
+        gain.gain.setValueAtTime(0.0001, t + i * 0.08);
+        gain.gain.linearRampToValueAtTime(0.06, t + i * 0.08 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.08 + 0.3);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t + i * 0.08);
+        osc.stop(t + i * 0.08 + 0.32);
+      });
+    } catch {}
+  }
+
+  public playSuccessFanfare() {
+    if (this.isMuted) return;
+    try {
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, t + i * 0.09);
+        gain.gain.setValueAtTime(0.0001, t + i * 0.09);
+        gain.gain.linearRampToValueAtTime(0.08, t + i * 0.09 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.09 + 0.45);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t + i * 0.09);
+        osc.stop(t + i * 0.09 + 0.5);
+      });
     } catch {}
   }
 }

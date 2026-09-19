@@ -1,24 +1,43 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
-  Radar, 
-  RadarProps 
+  Radar,
+  DEFAULT_RADAR_FILTER
 } from './components/Radar';
 import { PresenceMeter } from './components/PresenceMeter';
-import { SensorPanel } from './components/SensorPanel';
-import { SettingsPanel } from './components/SettingsPanel';
 import { AndroidCodeViewer } from './components/AndroidCodeViewer';
+import { DetectionDetailModal } from './components/DetectionDetailModal';
+import { RealityCheckModal } from './components/RealityCheckModal';
+import { ShizukuPrivilegedModal } from './components/ShizukuPrivilegedModal';
+import { LiveCameraFeed } from './components/LiveCameraFeed';
+import { AcousticVisualizer } from './components/AcousticVisualizer';
+import { SettingsPanel } from './components/SettingsPanel';
+import { SensorMicromanageModal } from './components/SensorMicromanageModal';
+import { SensorSoundboard } from './components/soundboard/SensorSoundboard';
+import { HumanCalibrationStudio } from './components/HumanCalibrationStudio';
+import { CarriedDevicePanel } from './components/CarriedDevicePanel';
 import { 
   SensorReading, 
   SensorType, 
   RadarBlip, 
   PresenceState, 
-  FusionConfig 
+  FusionConfig, 
+  SensorPowerMode,
+  DetectionClassification,
+  RadarFilterSettings,
+  CreatureSize,
+  DeviceType,
+  VehicleType,
+  CalibratedHumanProfile,
+  CarriedDeviceSignal,
+  DeviceSignalFusionMetrics
 } from './types';
-import { 
-  PresenceFusionEngine, 
-  DEFAULT_FUSION_CONFIG 
-} from './utils/fusionEngine';
+import { bayesianFusionEngine } from './fusion/bayesianEngine';
+import { sessionOrchestrator } from './core/session';
+import { sensorRegistry } from './sensors';
 import { radarAudio } from './utils/audioSynth';
+import { carriedDeviceEngine } from './fusion/carriedDeviceSignalEngine';
+import { CameraDetectionTarget } from './sensors/cameraSensor';
+import { AcousticAnalysisResult } from './sensors/acousticSensor';
 import { 
   Radio, 
   Sliders, 
@@ -29,757 +48,969 @@ import {
   Sparkles, 
   ShieldCheck, 
   RefreshCw,
-  Info
+  Info,
+  Zap,
+  Layers,
+  Camera,
+  Cpu,
+  User,
+  PawPrint,
+  HelpCircle,
+  Play,
+  RotateCcw,
+  Compass,
+  Wifi,
+  Battery,
+  Flame,
+  AlertTriangle,
+  Car,
+  Smartphone,
+  SlidersHorizontal,
+  Scale,
+  Fingerprint,
+  CheckCircle2
 } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'radar' | 'sensors' | 'settings' | 'code'>('radar');
-  const [fusionConfig, setFusionConfig] = useState<FusionConfig>(DEFAULT_FUSION_CONFIG);
-  const [manualConfidenceOverride, setManualConfidenceOverride] = useState<number | null>(null);
-  const [isMicActive, setIsMicActive] = useState(false);
+  const [activeTab, setActiveTab] = useState<'radar' | 'carried_signals' | 'calibration' | 'soundboard' | 'sensors' | 'settings' | 'code'>('radar');
+  const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [selectedBlip, setSelectedBlip] = useState<RadarBlip | null>(null);
+  const [showRealityCheck, setShowRealityCheck] = useState(false);
+  const [showShizukuModal, setShowShizukuModal] = useState(false);
+  const [showMicromanageModal, setShowMicromanageModal] = useState(false);
+  const [showCarriedDevicesModal, setShowCarriedDevicesModal] = useState(false);
+  const [carriedMetrics, setCarriedMetrics] = useState<DeviceSignalFusionMetrics>(() => carriedDeviceEngine.computeCurrentMetrics());
+  const [showOccupancyGrid, setShowOccupancyGrid] = useState(false);
+  const [activeCameraFeed, setActiveCameraFeed] = useState(true);
+  const [compassHeading, setCompassHeading] = useState(14); // degrees
+  const [radarFilters, setRadarFilters] = useState<RadarFilterSettings>(DEFAULT_RADAR_FILTER);
 
-  // Fusion Engine Instance
-  const fusionEngineRef = useRef<PresenceFusionEngine>(new PresenceFusionEngine());
+  // Subscribe to carried device engine metrics updates
+  useEffect(() => {
+    const unsub = carriedDeviceEngine.subscribe((_, newMetrics) => {
+      setCarriedMetrics(newMetrics);
+    });
+    return unsub;
+  }, []);
 
-  // Sensor state store
-  const [sensorReadings, setSensorReadings] = useState<Record<SensorType, SensorReading>>({
-    proximity: { type: 'proximity', timestamp: Date.now(), isAvailable: true, values: { isNear: false, proximityDistanceCm: 5.0 } },
-    accelerometer: { type: 'accelerometer', timestamp: Date.now(), isAvailable: true, values: { motionDelta: 0.05, accelX: 0, accelY: 0, accelZ: 9.8 } },
-    gyroscope: { type: 'gyroscope', timestamp: Date.now(), isAvailable: true, values: { rotationDelta: 0.02, gyroX: 0, gyroY: 0, gyroZ: 0 } },
-    light: { type: 'light', timestamp: Date.now(), isAvailable: true, values: { lux: 320, isOccluded: false } },
-    magnetometer: { type: 'magnetometer', timestamp: Date.now(), isAvailable: true, values: { magAnomoly: 0.4, magX: 18, magY: -5, magZ: 42 } },
-    ble: { 
-      type: 'ble', 
-      timestamp: Date.now(), 
-      isAvailable: true, 
-      values: { 
-        bleCount: 1, 
-        strongestRssi: -78,
-        nearbyDevices: [{ id: 'BLE-01', rssi: -78, name: 'Smart Accessory', estimatedDistanceM: 1.4 }] 
-      } 
-    },
-    acoustic: { type: 'acoustic', timestamp: Date.now(), isAvailable: true, values: { soundLevelDb: -65, acousticAnomalyScore: 5 } },
+  // Session & Power state
+  const [powerMode, setPowerMode] = useState<SensorPowerMode>('full');
+  const [shizukuStatus, setShizukuStatus] = useState(sessionOrchestrator.getShizukuStatus());
+  const powerBudget = sessionOrchestrator.getPowerBudgetStatus();
+
+  // Fusion Config with saved Calibrated Human Profile restoration
+  const [fusionConfig, setFusionConfig] = useState<FusionConfig>(() => {
+    const base = bayesianFusionEngine.getConfig();
+    try {
+      const savedProfile = localStorage.getItem('sensor_radar_active_human_profile');
+      if (savedProfile) {
+        const parsed = JSON.parse(savedProfile) as CalibratedHumanProfile;
+        base.activeHumanProfile = parsed;
+        bayesianFusionEngine.updateConfig(base);
+      }
+    } catch {}
+    return base;
   });
 
-  // Current calculated Presence state
+  // Real-time fused state & blips
   const [presenceState, setPresenceState] = useState<PresenceState>({
     confidenceScore: 0,
     presenceLevel: 'CLEAR',
     dominantSensor: 'none',
-    breakdown: { proximity: 0, accelerometer: 0, gyroscope: 0, light: 0, magnetometer: 0, ble: 0, acoustic: 0 },
+    breakdown: {},
     lastUpdated: Date.now(),
     alertTriggered: false,
     estimatedProximityMeters: undefined,
   });
 
-  // Audio Context stream for real microphone
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
+  const [radarBlips, setRadarBlips] = useState<RadarBlip[]>([]);
+  const [cameraDetections, setCameraDetections] = useState<CameraDetectionTarget[]>([]);
+  const [acousticData, setAcousticData] = useState<AcousticAnalysisResult | null>(null);
 
-  // Dynamic Radar Blips generated based on sensor state
-  const blips: RadarBlip[] = useMemo(() => {
-    const list: RadarBlip[] = [];
-    const now = Date.now();
+  // Sensor state for telemetry table
+  const [latestReadings, setLatestReadings] = useState<Partial<Record<SensorType, SensorReading>>>({});
 
-    // 1. Proximity Blip if Near
-    if (sensorReadings.proximity.values.isNear) {
-      list.push({
-        id: 'blip-prox',
-        angle: 15,
-        distance: 0.22, // very close to center
-        strength: 95,
-        type: 'proximity',
-        label: 'Direct Obstacle (Hand/Body)',
-        lastDetected: now,
-      });
-    }
+  // 1. Start all sensors & setup polling loops
+  useEffect(() => {
+    // Start sensor modules
+    sensorRegistry.startAll();
 
-    // 2. Motion / Vibration Blips
-    const motion = sensorReadings.accelerometer.values.motionDelta ?? 0;
-    if (motion > 0.3) {
-      list.push({
-        id: 'blip-motion',
-        angle: 140,
-        distance: Math.max(0.2, Math.min(0.85, 1.0 - (motion / 4.0))),
-        strength: Math.min(100, Math.round(motion * 30)),
-        type: 'accelerometer',
-        label: `Surface Vibration (${motion.toFixed(1)} m/s²)`,
-        lastDetected: now,
-      });
-    }
-
-    // 3. BLE Peripheral Devices
-    const devices = sensorReadings.ble.values.nearbyDevices ?? [];
-    devices.forEach((dev, idx) => {
-      const angles = [65, 210, 310, 175];
-      const dist = Math.max(0.25, Math.min(0.9, (Math.abs(dev.rssi) - 40) / 60));
-      list.push({
-        id: dev.id,
-        angle: angles[idx % angles.length],
-        distance: dist,
-        strength: Math.max(10, Math.min(95, (dev.rssi + 100) * 1.5)),
-        type: 'ble',
-        label: `${dev.name || 'BLE Device'} (${dev.rssi} dBm)`,
-        lastDetected: now,
-      });
+    // Subscribe to sensor readings
+    const unsubCamera = sensorRegistry.camera.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, camera: reading }));
+      const val = reading.value as { targets?: CameraDetectionTarget[] };
+      if (val?.targets) setCameraDetections(val.targets);
     });
 
-    // 4. Acoustic Anomaly Blip
-    const acousticScore = sensorReadings.acoustic.values.acousticAnomalyScore ?? 0;
-    if (acousticScore > 20) {
-      list.push({
-        id: 'blip-acoustic',
-        angle: 260,
-        distance: Math.max(0.3, Math.min(0.85, 1.0 - (acousticScore / 130))),
-        strength: acousticScore,
-        type: 'acoustic',
-        label: `Acoustic Signature (${acousticScore.toFixed(0)}%)`,
-        lastDetected: now,
-      });
-    }
+    const unsubAcoustic = sensorRegistry.acoustic.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, acoustic: reading }));
+      setAcousticData(reading.value as AcousticAnalysisResult);
+    });
 
-    // 5. Light Occlusion Blip
-    if (sensorReadings.light.values.isOccluded) {
-      list.push({
-        id: 'blip-light',
-        angle: 330,
-        distance: 0.35,
-        strength: 80,
-        type: 'light',
-        label: 'Light Occlusion Shadow',
-        lastDetected: now,
-      });
-    }
+    const unsubWifi = sensorRegistry.wifi.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, wifi_rssi: reading }));
+    });
 
-    return list;
-  }, [sensorReadings]);
+    const unsubBle = sensorRegistry.ble.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, ble: reading }));
+    });
 
-  // Main fusion loop
-  useEffect(() => {
-    const intervalMs = Math.round(1000 / fusionConfig.updateRateHz);
+    const unsubImu = sensorRegistry.imu.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, accelerometer: reading }));
+    });
 
-    const timer = setInterval(() => {
-      // Feed readings into engine
-      (Object.keys(sensorReadings) as SensorType[]).forEach((type) => {
-        fusionEngineRef.current.updateSensorReading(sensorReadings[type]);
-      });
-
-      const calculated = fusionEngineRef.current.calculateState(fusionConfig);
-
-      // Check for manual override in demo mode
-      if (manualConfidenceOverride !== null) {
-        calculated.confidenceScore = manualConfidenceOverride;
-        calculated.alertTriggered = manualConfidenceOverride >= fusionConfig.alertThreshold;
-        if (manualConfidenceOverride >= 80) calculated.presenceLevel = 'IMMEDIATE';
-        else if (manualConfidenceOverride >= 55) calculated.presenceLevel = 'ELEVATED';
-        else if (manualConfidenceOverride >= 25) calculated.presenceLevel = 'POSSIBLE';
-        else calculated.presenceLevel = 'CLEAR';
+    const unsubMag = sensorRegistry.magnetometer.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, magnetometer: reading }));
+      const val = reading.value as { headingDeg?: number };
+      if (val?.headingDeg !== undefined) {
+        setCompassHeading(val.headingDeg);
       }
+    });
 
-      setPresenceState(calculated);
+    const unsubEnv = sensorRegistry.environment.subscribe((reading) => {
+      bayesianFusionEngine.ingestReading(reading);
+      setLatestReadings((prev) => ({ ...prev, barometer: reading }));
+    });
 
-      // Trigger audio sonar ping if enabled
-      if (fusionConfig.soundAlerts && calculated.confidenceScore > 10) {
-        radarAudio.playSonarPing(calculated.confidenceScore);
+    // Main Fusion Evaluation Heartbeat (15 Hz)
+    const evalInterval = setInterval(() => {
+      const result = bayesianFusionEngine.evaluateFusion();
+      setPresenceState(result.presenceState);
+      setRadarBlips(result.radarBlips);
+
+      // Audio feedback when score crosses threshold
+      if (!isAudioMuted && result.presenceState.confidenceScore > 25) {
+        radarAudio.playRadarTick(result.presenceState.confidenceScore);
       }
+    }, 66);
 
-      // Trigger vibration alert if enabled and threshold crossed
-      if (calculated.alertTriggered && fusionConfig.vibrationAlerts && typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate(60);
-      }
-    }, intervalMs);
-
-    return () => clearInterval(timer);
-  }, [sensorReadings, fusionConfig, manualConfidenceOverride]);
-
-  // Real Web Motion Listener (when running on actual mobile device)
-  useEffect(() => {
-    const handleDeviceMotion = (e: DeviceMotionEvent) => {
-      if (!e.accelerationIncludingGravity) return;
-      const x = e.accelerationIncludingGravity.x ?? 0;
-      const y = e.accelerationIncludingGravity.y ?? 0;
-      const z = e.accelerationIncludingGravity.z ?? 9.8;
-      const mag = Math.sqrt(x * x + y * y + z * z);
-      const delta = Math.abs(mag - 9.8);
-
-      if (delta > 0.15) {
-        setSensorReadings((prev) => ({
-          ...prev,
-          accelerometer: {
-            type: 'accelerometer',
-            timestamp: Date.now(),
-            isAvailable: true,
-            values: {
-              accelX: +x.toFixed(2),
-              accelY: +y.toFixed(2),
-              accelZ: +z.toFixed(2),
-              motionDelta: +delta.toFixed(2),
-            },
-          },
-        }));
-      }
-    };
-
-    if (typeof window !== 'undefined' && 'ondevicemotion' in window) {
-      window.addEventListener('devicemotion', handleDeviceMotion);
-    }
     return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('devicemotion', handleDeviceMotion);
-      }
+      unsubCamera();
+      unsubAcoustic();
+      unsubWifi();
+      unsubBle();
+      unsubImu();
+      unsubMag();
+      unsubEnv();
+      clearInterval(evalInterval);
+      sensorRegistry.stopAll();
     };
-  }, []);
+  }, [isAudioMuted]);
 
-  // Real Microphone Stream Setup
-  const toggleMicrophone = async () => {
-    if (isMicActive) {
-      // Turn off
-      if (micStreamRef.current) {
-        micStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
-      }
-      setIsMicActive(false);
-      return;
+  // Audio mute toggle
+  const toggleAudio = () => {
+    const next = !isAudioMuted;
+    setIsAudioMuted(next);
+    radarAudio.setMuted(next);
+  };
+
+  // Power Mode change handler
+  const handlePowerModeChange = (mode: SensorPowerMode) => {
+    setPowerMode(mode);
+    sessionOrchestrator.setPowerMode(mode);
+  };
+
+  // Shizuku toggle handler
+  const handleToggleShizuku = (enabled: boolean) => {
+    sessionOrchestrator.setShizukuEnabled(enabled);
+    setShizukuStatus(sessionOrchestrator.getShizukuStatus());
+  };
+
+  // Emit manual ultrasonic chirp
+  const handleEmitChirp = () => {
+    sensorRegistry.acoustic.emitUltrasonicChirp();
+    if (!isAudioMuted) {
+      radarAudio.playPingSound(880);
     }
+  };
 
+  // Human Target Identifier Profile Handlers
+  const handleSaveHumanProfile = (profile: CalibratedHumanProfile) => {
+    const updated: FusionConfig = {
+      ...fusionConfig,
+      activeHumanProfile: profile,
+    };
+    setFusionConfig(updated);
+    bayesianFusionEngine.updateConfig(updated);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      micStreamRef.current = stream;
+      localStorage.setItem('sensor_radar_active_human_profile', JSON.stringify(profile));
+    } catch {}
+  };
 
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const audioCtx = new AudioCtx();
-      audioContextRef.current = audioCtx;
+  const handleClearHumanProfile = () => {
+    const updated: FusionConfig = {
+      ...fusionConfig,
+      activeHumanProfile: undefined,
+    };
+    setFusionConfig(updated);
+    bayesianFusionEngine.updateConfig(updated);
+    try {
+      localStorage.removeItem('sensor_radar_active_human_profile');
+    } catch {}
+  };
 
-      const source = audioCtx.createMediaStreamSource(stream);
-      audioSourceRef.current = source;
+  const handleLaunchRadarTest = (profile: CalibratedHumanProfile) => {
+    handleSaveHumanProfile(profile);
+    setActiveTab('radar');
+    setTimeout(() => {
+      triggerScenario('calibrated_human');
+    }, 280);
+  };
 
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      setIsMicActive(true);
-
-      // Read audio volume in loop
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
-
-      const processAudio = () => {
-        if (!analyserRef.current || !micStreamRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
-
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += dataArray[i];
-        }
-        const avg = sum / bufferLength;
-        const db = Math.round((avg / 255) * 80 - 80);
-        const anomaly = Math.min(100, Math.max(0, Math.round((avg / 90) * 100)));
-
-        setSensorReadings((prev) => ({
-          ...prev,
-          acoustic: {
-            type: 'acoustic',
-            timestamp: Date.now(),
-            isAvailable: true,
-            values: {
-              soundLevelDb: db,
-              acousticAnomalyScore: anomaly,
-            },
-          },
-        }));
-
-        if (micStreamRef.current?.active) {
-          requestAnimationFrame(processAudio);
-        }
-      };
-
-      requestAnimationFrame(processAudio);
-    } catch {
-      setIsMicActive(false);
+  // Preset Scenario Demonstrations
+  const triggerScenario = (scenario: 
+    | 'human_front' 
+    | 'calibrated_human'
+    | 'animal_room' 
+    | 'cadence_dark' 
+    | 'rf_wall' 
+    | 'car_passing'
+    | 'device_ble'
+    | 'creature_small'
+    | 'creature_large'
+    | 'quiet'
+  ) => {
+    if (scenario === 'calibrated_human') {
+      const prof = fusionConfig.activeHumanProfile;
+      const subjectName = prof?.stats.subjectName || 'Alex';
+      const weight = prof?.stats.weightKg || 74;
+      const cadence = prof?.metrics.gaitCadenceHz || 1.82;
+      sensorRegistry.camera.simulateCalibratedHumanDetection(subjectName, weight, 1.4, 8);
+      sensorRegistry.acoustic.simulateFootstep(cadence);
+      sensorRegistry.wifi.simulateInterference('Calibrated RF Tissue Shadow', 5.2);
+      sensorRegistry.ble.simulateNearbyTrack(`${subjectName}'s Phone`, -58, 1.3, 8, 'phone');
+      if (!isAudioMuted) {
+        radarAudio.playCalibrationStepChime();
+      }
+    } else if (scenario === 'human_front') {
+      sensorRegistry.camera.simulateHumanDetection(1.4, 8);
+      sensorRegistry.acoustic.simulateFootstep(1.6);
+      sensorRegistry.ble.simulateNearbyTrack('Human Smartphone', -62, 1.3, 8, 'phone');
+    } else if (scenario === 'animal_room') {
+      sensorRegistry.camera.simulateCreatureBySize('medium', 1.8, -22);
+      sensorRegistry.acoustic.simulateAnimalVocalization(78, 338, 'medium');
+    } else if (scenario === 'car_passing') {
+      sensorRegistry.camera.simulateVehicleDetection('car', 3.8, 135, 42);
+      sensorRegistry.acoustic.simulateVehicleRumble(3.8, 135);
+      sensorRegistry.magnetometer.simulateDisturbance(2.8);
+    } else if (scenario === 'device_ble') {
+      sensorRegistry.camera.simulateDeviceDetection('wearable', 1.2, 45);
+      sensorRegistry.ble.simulateNearbyTrack('Apple Watch Ultra', -58, 1.2, 45, 'wearable');
+    } else if (scenario === 'creature_small') {
+      sensorRegistry.camera.simulateCreatureBySize('small', 1.5, 290);
+      sensorRegistry.acoustic.simulateAnimalVocalization(82, 290, 'small');
+    } else if (scenario === 'creature_large') {
+      sensorRegistry.camera.simulateCreatureBySize('large', 2.8, 20);
+      sensorRegistry.acoustic.simulateAnimalVocalization(90, 20, 'large');
+    } else if (scenario === 'cadence_dark') {
+      sensorRegistry.camera.clearDetections();
+      sensorRegistry.acoustic.simulateFootstep(1.75);
+      sensorRegistry.wifi.simulateInterference('Living Room Mesh Node', 6.2);
+    } else if (scenario === 'rf_wall') {
+      sensorRegistry.camera.clearDetections();
+      sensorRegistry.wifi.simulateInterference('Office AP (Through Wall)', 7.8);
+      sensorRegistry.ble.simulateNearbyTrack('Smart TV / Wearable', -82, 3.2, 210, 'tracker');
+    } else if (scenario === 'quiet') {
+      sensorRegistry.camera.clearDetections();
     }
   };
 
-  // Helper to trigger simulated sensor values
-  const handleTriggerSimulation = (type: SensorType, values: Record<string, unknown>) => {
-    setManualConfidenceOverride(null); // Return to engine-driven mode
-    setSensorReadings((prev) => ({
-      ...prev,
-      [type]: {
-        ...prev[type],
-        timestamp: Date.now(),
-        values: {
-          ...prev[type].values,
-          ...values,
-        },
-      },
-    }));
-  };
-
-  // Preset Scenario Handlers
-  const handleScenarioPreset = (presetName: string) => {
-    switch (presetName) {
-      case 'idle':
-        setManualConfidenceOverride(null);
-        fusionEngineRef.current.reset();
-        setSensorReadings({
-          proximity: { type: 'proximity', timestamp: Date.now(), isAvailable: true, values: { isNear: false, proximityDistanceCm: 5.0 } },
-          accelerometer: { type: 'accelerometer', timestamp: Date.now(), isAvailable: true, values: { motionDelta: 0.02 } },
-          gyroscope: { type: 'gyroscope', timestamp: Date.now(), isAvailable: true, values: { rotationDelta: 0.01 } },
-          light: { type: 'light', timestamp: Date.now(), isAvailable: true, values: { lux: 320, isOccluded: false } },
-          magnetometer: { type: 'magnetometer', timestamp: Date.now(), isAvailable: true, values: { magAnomoly: 0.2 } },
-          ble: { type: 'ble', timestamp: Date.now(), isAvailable: true, values: { bleCount: 0, strongestRssi: -95, nearbyDevices: [] } },
-          acoustic: { type: 'acoustic', timestamp: Date.now(), isAvailable: true, values: { soundLevelDb: -72, acousticAnomalyScore: 0 } },
-        });
-        break;
-
-      case 'walking':
-        setManualConfidenceOverride(null);
-        setSensorReadings({
-          proximity: { type: 'proximity', timestamp: Date.now(), isAvailable: true, values: { isNear: false, proximityDistanceCm: 5.0 } },
-          accelerometer: { type: 'accelerometer', timestamp: Date.now(), isAvailable: true, values: { motionDelta: 0.85 } },
-          gyroscope: { type: 'gyroscope', timestamp: Date.now(), isAvailable: true, values: { rotationDelta: 0.4 } },
-          light: { type: 'light', timestamp: Date.now(), isAvailable: true, values: { lux: 280, isOccluded: false } },
-          magnetometer: { type: 'magnetometer', timestamp: Date.now(), isAvailable: true, values: { magAnomoly: 1.5 } },
-          ble: { 
-            type: 'ble', 
-            timestamp: Date.now(), 
-            isAvailable: true, 
-            values: { 
-              bleCount: 1, 
-              strongestRssi: -74,
-              nearbyDevices: [{ id: 'DEV-WALK', rssi: -74, name: 'Approaching Fitness Band', estimatedDistanceM: 1.8 }] 
-            } 
-          },
-          acoustic: { type: 'acoustic', timestamp: Date.now(), isAvailable: true, values: { soundLevelDb: -52, acousticAnomalyScore: 35 } },
-        });
-        break;
-
-      case 'ble_proximity':
-        setManualConfidenceOverride(null);
-        setSensorReadings({
-          proximity: { type: 'proximity', timestamp: Date.now(), isAvailable: true, values: { isNear: false, proximityDistanceCm: 5.0 } },
-          accelerometer: { type: 'accelerometer', timestamp: Date.now(), isAvailable: true, values: { motionDelta: 0.15 } },
-          gyroscope: { type: 'gyroscope', timestamp: Date.now(), isAvailable: true, values: { rotationDelta: 0.1 } },
-          light: { type: 'light', timestamp: Date.now(), isAvailable: true, values: { lux: 310, isOccluded: false } },
-          magnetometer: { type: 'magnetometer', timestamp: Date.now(), isAvailable: true, values: { magAnomoly: 0.8 } },
-          ble: { 
-            type: 'ble', 
-            timestamp: Date.now(), 
-            isAvailable: true, 
-            values: { 
-              bleCount: 3, 
-              strongestRssi: -48,
-              nearbyDevices: [
-                { id: 'DEV-01', rssi: -48, name: 'Nearby Phone', estimatedDistanceM: 0.6 },
-                { id: 'DEV-02', rssi: -62, name: 'Smart Watch', estimatedDistanceM: 1.1 },
-                { id: 'DEV-03', rssi: -78, name: 'BLE Tag', estimatedDistanceM: 2.1 }
-              ] 
-            } 
-          },
-          acoustic: { type: 'acoustic', timestamp: Date.now(), isAvailable: true, values: { soundLevelDb: -60, acousticAnomalyScore: 12 } },
-        });
-        break;
-
-      case 'elevated':
-        setManualConfidenceOverride(null);
-        setSensorReadings({
-          proximity: { type: 'proximity', timestamp: Date.now(), isAvailable: true, values: { isNear: false, proximityDistanceCm: 5.0 } },
-          accelerometer: { type: 'accelerometer', timestamp: Date.now(), isAvailable: true, values: { motionDelta: 1.8 } },
-          gyroscope: { type: 'gyroscope', timestamp: Date.now(), isAvailable: true, values: { rotationDelta: 0.9 } },
-          light: { type: 'light', timestamp: Date.now(), isAvailable: true, values: { lux: 40, isOccluded: true } },
-          magnetometer: { type: 'magnetometer', timestamp: Date.now(), isAvailable: true, values: { magAnomoly: 6.2 } },
-          ble: { 
-            type: 'ble', 
-            timestamp: Date.now(), 
-            isAvailable: true, 
-            values: { 
-              bleCount: 2, 
-              strongestRssi: -45,
-              nearbyDevices: [
-                { id: 'DEV-HIGH', rssi: -45, name: 'Handheld Mobile', estimatedDistanceM: 0.5 }
-              ] 
-            } 
-          },
-          acoustic: { type: 'acoustic', timestamp: Date.now(), isAvailable: true, values: { soundLevelDb: -42, acousticAnomalyScore: 72 } },
-        });
-        break;
-
-      case 'immediate_proximity':
-        setManualConfidenceOverride(null);
-        setSensorReadings({
-          proximity: { type: 'proximity', timestamp: Date.now(), isAvailable: true, values: { isNear: true, proximityDistanceCm: 0.8 } },
-          accelerometer: { type: 'accelerometer', timestamp: Date.now(), isAvailable: true, values: { motionDelta: 2.2 } },
-          gyroscope: { type: 'gyroscope', timestamp: Date.now(), isAvailable: true, values: { rotationDelta: 1.2 } },
-          light: { type: 'light', timestamp: Date.now(), isAvailable: true, values: { lux: 2, isOccluded: true } },
-          magnetometer: { type: 'magnetometer', timestamp: Date.now(), isAvailable: true, values: { magAnomoly: 12.0 } },
-          ble: { 
-            type: 'ble', 
-            timestamp: Date.now(), 
-            isAvailable: true, 
-            values: { 
-              bleCount: 2, 
-              strongestRssi: -38,
-              nearbyDevices: [
-                { id: 'DEV-PROX', rssi: -38, name: 'Direct User Device', estimatedDistanceM: 0.3 }
-              ] 
-            } 
-          },
-          acoustic: { type: 'acoustic', timestamp: Date.now(), isAvailable: true, values: { soundLevelDb: -38, acousticAnomalyScore: 88 } },
-        });
-        break;
+  const handleModalSimulate = (action: string) => {
+    if (action === 'sim_human_center') {
+      sensorRegistry.camera.simulateHumanDetection(1.4, 8);
+    } else if (action === 'sim_car_passing') {
+      sensorRegistry.camera.simulateVehicleDetection('car', 3.8, 135, 38);
+      sensorRegistry.acoustic.simulateVehicleRumble(3.8, 135);
+    } else if (action === 'sim_creature_small') {
+      sensorRegistry.camera.simulateCreatureBySize('small', 1.8, 305);
+    } else if (action === 'sim_creature_large') {
+      sensorRegistry.camera.simulateCreatureBySize('large', 3.2, 25);
+    } else if (action === 'sim_ble_phone') {
+      sensorRegistry.ble.simulateNearbyTrack('Pixel 9 Pro', -55, 1.3, 45, 'phone');
+    } else if (action === 'sim_ble_tracker') {
+      sensorRegistry.ble.simulateNearbyTrack('AirTag Beacon', -74, 0.8, 210, 'tracker');
+    } else if (action === 'sim_ultrasonic_ping') {
+      handleEmitChirp();
+    } else if (action === 'sim_vehicle_rumble') {
+      sensorRegistry.acoustic.simulateVehicleRumble(3.5, 115);
+    } else if (action === 'sim_rf_perturbation') {
+      sensorRegistry.wifi.simulateInterference('Test Perturbation', 5.5);
     }
   };
-
-  const displayedScore = presenceState.confidenceScore;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
-      {/* Top Application Bar */}
-      <header className="sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-500/10">
-              <Radio className="w-5 h-5 animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-white tracking-tight font-mono">
-                  SensorRadar
-                </h1>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold">
-                  NON-CAMERA FUSION
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 hidden sm:block">
-                Privacy-friendly nearby human presence estimator with animated radar visualization
-              </p>
-            </div>
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col antialiased selection:bg-emerald-500 selection:text-black">
+      {/* Top Application Header */}
+      <header className="sticky top-0 z-40 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md px-4 lg:px-8 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 border border-emerald-500/40 text-emerald-400">
+            <Radio className="w-5 h-5 animate-pulse" />
           </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                SensorRadar
+              </h1>
+              <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                PROD SENSOR-FUSION
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 hidden sm:block">
+              Multi-sensor Bayesian presence estimator • Zero cloud dependency
+            </p>
+          </div>
+        </div>
 
-          {/* Nav Tabs */}
-          <nav className="flex items-center gap-1.5 font-mono text-xs">
-            <button
-              id="tab-radar-btn"
-              onClick={() => setActiveTab('radar')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                activeTab === 'radar'
-                  ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-              }`}
-            >
-              <Radio className="w-3.5 h-3.5" />
-              <span>Radar</span>
-            </button>
+        {/* Action Controls & Modal Triggers */}
+        <div className="flex items-center gap-2">
+          {/* Reality Check Button */}
+          <button
+            type="button"
+            onClick={() => setShowRealityCheck(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 transition-colors"
+            title="Open Reality Check guide on stock Android/iOS physics constraints"
+          >
+            <Info className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Hardware Reality Check</span>
+          </button>
 
-            <button
-              id="tab-sensors-btn"
-              onClick={() => setActiveTab('sensors')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                activeTab === 'sensors'
-                  ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-              }`}
-            >
-              <Activity className="w-3.5 h-3.5" />
-              <span>Sensors</span>
-            </button>
+          {/* Shizuku Privileged Button */}
+          <button
+            type="button"
+            onClick={() => setShowShizukuModal(true)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono border transition-colors ${
+              shizukuStatus.isEnabled
+                ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title="Configure Shizuku ADB-shell throttle bypass"
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Shizuku {shizukuStatus.isEnabled ? 'Active' : 'Off'}</span>
+          </button>
 
-            <button
-              id="tab-settings-btn"
-              onClick={() => setActiveTab('settings')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                activeTab === 'settings'
-                  ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-              }`}
-            >
-              <Sliders className="w-3.5 h-3.5" />
-              <span>Tuning</span>
-            </button>
-
-            <button
-              id="tab-code-btn"
-              onClick={() => setActiveTab('code')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                activeTab === 'code'
-                  ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-              }`}
-            >
-              <FileCode className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Android Code</span>
-            </button>
-          </nav>
+          {/* Sound Mute Toggle */}
+          <button
+            type="button"
+            onClick={toggleAudio}
+            className={`p-2 rounded-lg border transition-colors ${
+              isAudioMuted 
+                ? 'bg-slate-900 border-slate-800 text-slate-500' 
+                : 'bg-slate-800 border-slate-700 text-emerald-400'
+            }`}
+            title={isAudioMuted ? 'Unmute radar audio feedback' : 'Mute radar audio feedback'}
+          >
+            {isAudioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* TAB 1: RADAR HOME SCREEN */}
+      {/* Main Tab Navigation */}
+      <div className="border-b border-slate-800/80 bg-slate-950/60 px-4 lg:px-8">
+        <div className="flex space-x-1 sm:space-x-3 overflow-x-auto py-2 scrollbar-none">
+          <button
+            type="button"
+            onClick={() => setActiveTab('radar')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'radar'
+                ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Radio className="w-4 h-4" />
+            <span>Presence Radar</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('carried_signals')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'carried_signals'
+                ? 'bg-gradient-to-r from-cyan-500/20 to-emerald-500/20 border border-cyan-500/40 text-cyan-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Radio className="w-4 h-4 text-cyan-400 animate-pulse" />
+            <span>Carried Devices</span>
+            {carriedMetrics.accuracyImprovementPercent > 0 ? (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-0.5">
+                <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
+                +{carriedMetrics.accuracyImprovementPercent}% ACC
+              </span>
+            ) : (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                RF FUSION
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('calibration')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'calibration'
+                ? 'bg-gradient-to-r from-cyan-500/20 via-emerald-500/20 to-amber-500/20 border border-cyan-500/40 text-cyan-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Fingerprint className="w-4 h-4 text-cyan-400" />
+            <span>Human Target Calibration</span>
+            {fusionConfig.activeHumanProfile && fusionConfig.activeHumanProfile.isActive ? (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                TRAINED
+              </span>
+            ) : (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                TOOL
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('soundboard')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'soundboard'
+                ? 'bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <SlidersHorizontal className="w-4 h-4 text-cyan-400" />
+            <span>Sensor Soundboard</span>
+            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+              NEW
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('sensors')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'sensors'
+                ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Activity className="w-4 h-4" />
+            <span>Sensor Streams & ML</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('settings')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'settings'
+                ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Sliders className="w-4 h-4" />
+            <span>Fusion Calibration & Power</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('code')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'code'
+                ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <FileCode className="w-4 h-4" />
+            <span>Android & NDK Source</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content Viewport */}
+      <main className="flex-1 p-4 lg:p-8 max-w-7xl mx-auto w-full space-y-6">
+        {/* TAB 1: RADAR HOME VIEW */}
         {activeTab === 'radar' && (
           <div className="space-y-6">
-            {/* Top Info Banner */}
-            <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400 font-mono">
+            {/* Top Confidence Index Banner */}
+            <PresenceMeter 
+              state={presenceState}
+              alertThreshold={fusionConfig.alertThreshold}
+            />
+
+            {/* Quick Scenario Injector Toolbar */}
+            <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
               <div className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <span className="text-slate-300 font-semibold">Camera Access Disabled:</span>
-                <span>Estimates nearby human presence solely via Phone Hardware Sensor Fusion (Proximity, BLE RSSI, Accelerometer, Light Occlusion, Acoustic).</span>
+                <Sparkles className="w-4 h-4 text-emerald-400" />
+                <span className="font-semibold text-slate-200">Hardware & Scenario Injector:</span>
+                <span className="text-[11px] text-slate-400 hidden sm:inline">Test multi-sensor cross-validation</span>
               </div>
 
-              {/* Sonar Audio Toggle */}
-              <button
-                onClick={() => setFusionConfig((c) => ({ ...c, soundAlerts: !c.soundAlerts }))}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors ${
-                  fusionConfig.soundAlerts
-                    ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-                    : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-slate-300'
-                }`}
-              >
-                {fusionConfig.soundAlerts ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-                <span>Sonar Sound: {fusionConfig.soundAlerts ? 'ON' : 'OFF'}</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('human_front')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>Human (008° N)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('car_passing')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition-colors"
+                >
+                  <Car className="w-3.5 h-3.5" />
+                  <span>Car (135° SE)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('device_ble')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 transition-colors"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>Device (045° NE)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('creature_small')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-colors"
+                >
+                  <PawPrint className="w-3.5 h-3.5" />
+                  <span>Cat / Small (&lt;5kg)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('creature_large')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-600/15 hover:bg-amber-600/25 text-amber-200 border border-amber-600/30 transition-colors"
+                >
+                  <Scale className="w-3.5 h-3.5" />
+                  <span>Large Creature (&gt;25kg)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('cadence_dark')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 transition-colors"
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                  <span>Footsteps (Dark)</span>
+                </button>
+
+                {fusionConfig.activeHumanProfile && fusionConfig.activeHumanProfile.isActive ? (
+                  <button
+                    type="button"
+                    onClick={() => triggerScenario('calibrated_human')}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-gradient-to-r from-cyan-500/25 via-emerald-500/25 to-amber-500/25 hover:from-cyan-500/35 hover:to-amber-500/35 text-white border border-cyan-400/50 font-bold transition-all shadow-md shadow-cyan-950/50 cursor-pointer"
+                    title={`Simulate detection of calibrated user ${fusionConfig.activeHumanProfile.stats.subjectName}`}
+                  >
+                    <Fingerprint className="w-3.5 h-3.5 text-cyan-300" />
+                    <span>Target ID: {fusionConfig.activeHumanProfile.stats.subjectName}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('calibration')}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 transition-colors cursor-pointer"
+                    title="Train device to recognize your unique physical presence"
+                  >
+                    <Fingerprint className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Calibrate Me</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    carriedDeviceEngine.simulatePreset('full_constellation');
+                    triggerScenario('human_front');
+                    if (!isAudioMuted) {
+                      radarAudio.playTargetLocked();
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-gradient-to-r from-emerald-500/25 via-cyan-500/25 to-blue-500/25 hover:from-emerald-500/35 hover:to-blue-500/35 text-white border border-emerald-400/50 font-bold transition-all shadow-md shadow-emerald-950/50 cursor-pointer"
+                  title="Simulate human target carrying phone, smartwatch, earbuds & tag (+88% Centimeter Lock)"
+                >
+                  <Radio className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>Carried RF Lock (+88%)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => triggerScenario('quiet')}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Clear</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('soundboard')}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 font-bold transition-colors cursor-pointer"
+                  title="Open Soundboard Mixer Console with rotary knobs and faders"
+                >
+                  <SlidersHorizontal className="w-3 h-3" />
+                  <span>Soundboard Mixer</span>
+                </button>
+              </div>
             </div>
 
-            {/* Radar View Layout (Center Radar Canvas + Side Presence Meter & Stimulators) */}
+            {/* Main Radar Display Stage & Side Diagnostics */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Left/Center: The Radar Component with Live Confidence Modulation */}
-              <div className="lg:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-6 backdrop-blur-md flex flex-col items-center justify-center relative shadow-2xl">
-                <div className="w-full flex items-center justify-between mb-4 border-b border-slate-800/80 pb-3">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
-                    <h2 className="text-sm font-bold font-mono tracking-wider text-slate-200 uppercase">
-                      Active Sensor Radar Sweep
-                    </h2>
-                  </div>
+              {/* Center Radar Sweep View */}
+              <div className="lg:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-6 flex flex-col items-center justify-center min-h-[500px] shadow-2xl relative">
+                <Radar
+                  confidenceScore={presenceState.confidenceScore}
+                  size={420}
+                  isScanning={true}
+                  compassHeading={compassHeading}
+                  blips={radarBlips}
+                  onBlipClick={(blip) => setSelectedBlip(blip)}
+                  alertThreshold={fusionConfig.alertThreshold}
+                  showOccupancyGrid={showOccupancyGrid}
+                  onToggleOccupancyGrid={() => setShowOccupancyGrid(!showOccupancyGrid)}
+                  onOpenMicromanage={() => setShowMicromanageModal(true)}
+                  onOpenCarriedDevices={() => setShowCarriedDevicesModal(true)}
+                  carriedDevicesCount={carriedMetrics.totalCarriedDevices}
+                  accuracyBoostPercent={carriedMetrics.accuracyImprovementPercent}
+                  filterSettings={radarFilters}
+                  onUpdateFilter={setRadarFilters}
+                />
 
-                  <span className="text-xs font-mono text-slate-400">
-                    Pulse Intensity: <strong className="text-emerald-400">{displayedScore}%</strong>
-                  </span>
-                </div>
-
-                {/* THE RADAR COMPONENT */}
-                <div className="my-2 p-2 relative flex items-center justify-center">
-                  <Radar
-                    confidenceScore={displayedScore}
-                    size={380}
-                    isScanning={true}
-                    blips={blips}
-                    alertThreshold={fusionConfig.alertThreshold}
-                    onBlipClick={(b) => setSelectedBlip(b)}
-                    showDistanceLabels={true}
-                    showAzimuthLines={true}
-                    showBearingNumbers={true}
-                    showSweepTrail={true}
-                  />
-                </div>
-
-                {/* Direct Confidence Modulation Slider */}
-                <div className="w-full mt-4 p-4 rounded-xl bg-slate-950/70 border border-slate-800/90 font-mono space-y-2">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                      Direct Confidence Modulator (Prop Value):
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-emerald-400 font-bold text-sm">{displayedScore} / 100</span>
-                      {manualConfidenceOverride !== null && (
-                        <button
-                          onClick={() => setManualConfidenceOverride(null)}
-                          className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-200 underline"
-                        >
-                          <RefreshCw className="w-3 h-3" /> Auto Fusion
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  <input
-                    id="radar-confidence-slider"
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={displayedScore}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value);
-                      setManualConfidenceOverride(val);
-                      fusionEngineRef.current.setScore(val);
-                    }}
-                    className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-400">
-                    <span>0% (Calm Idle Waves)</span>
-                    <span>50% (Active Mid Ripple)</span>
-                    <span>100% (High Energy Excited Ping)</span>
-                  </div>
+                <div className="mt-4 text-center text-xs text-slate-400">
+                  <span>Click any radar blip above to inspect contributing sensor breakdowns</span>
                 </div>
               </div>
 
-              {/* Right: Presence Meter & Scenario Presets */}
+              {/* Right Side: Live Visual & Acoustic Telemetry */}
               <div className="lg:col-span-5 space-y-4">
-                {/* Confidence & Presence State Gauge */}
-                <PresenceMeter
-                  state={presenceState}
-                  alertThreshold={fusionConfig.alertThreshold}
+                {/* On-Device Camera ML Feed */}
+                <LiveCameraFeed
+                  isActive={activeCameraFeed}
+                  onToggleActive={() => setActiveCameraFeed(!activeCameraFeed)}
+                  detections={cameraDetections}
                 />
 
-                {/* Scenario Simulator Presets */}
-                <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 sm:p-5 backdrop-blur-md space-y-3 font-mono">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                    <h3 className="text-xs font-bold text-slate-200 tracking-wider uppercase">
-                      Presence Signature Scenarios
-                    </h3>
-                    <span className="text-[11px] text-slate-400">Instant Demo States</span>
+                {/* Acoustic Sonar & Bioacoustic Spectrum */}
+                <AcousticVisualizer
+                  data={acousticData}
+                  onEmitChirp={handleEmitChirp}
+                />
+
+                {/* Active Detected Targets Table */}
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-xl">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-xs font-semibold text-slate-200 uppercase tracking-wider">
+                      Active Classified Tracks ({radarBlips.length})
+                    </h4>
+                    <span className="text-[11px] font-mono text-slate-500">Tap track for breakdown</span>
                   </div>
 
-                  <div className="space-y-2">
-                    <button
-                      onClick={() => handleScenarioPreset('idle')}
-                      className="w-full p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-left hover:border-slate-700 transition-colors flex items-center justify-between group"
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-slate-200 group-hover:text-emerald-400">
-                          1. Quiet / Empty Room
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-sans">
-                          Phone resting, ambient lux constant, no BLE or motion delta.
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-emerald-400 font-bold">
-                        0%
-                      </span>
-                    </button>
+                  {radarBlips.length > 0 ? (
+                    <div className="space-y-2">
+                      {radarBlips.map((blip) => {
+                        const isHuman = blip.classification === 'human';
+                        const isAnimal = blip.classification === 'animal';
+                        const badgeColor = isHuman ? 'text-emerald-400' : (isAnimal ? 'text-amber-400' : 'text-cyan-400');
+                        const Icon = isHuman ? User : (isAnimal ? PawPrint : HelpCircle);
 
-                    <button
-                      onClick={() => handleScenarioPreset('walking')}
-                      className="w-full p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-left hover:border-slate-700 transition-colors flex items-center justify-between group"
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-slate-200 group-hover:text-cyan-400">
-                          2. Distant Footsteps / Walking
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-sans">
-                          Desk vibration jitter + low acoustic delta detected.
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-cyan-400 font-bold">
-                        35%
-                      </span>
-                    </button>
+                        return (
+                          <div
+                            key={blip.id}
+                            onClick={() => setSelectedBlip(blip)}
+                            className="p-2.5 bg-slate-950/80 border border-slate-800 hover:border-slate-700 rounded-xl flex items-center justify-between cursor-pointer transition-colors"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <div className={`p-1.5 rounded-lg bg-slate-800 ${badgeColor}`}>
+                                <Icon className="w-4 h-4" />
+                              </div>
+                              <div>
+                                <div className="text-xs font-bold text-slate-200">
+                                  {blip.label}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono">
+                                  {blip.distanceMeters.toFixed(1)}m • Azimuth: {Math.round(blip.angle)}°
+                                </div>
+                              </div>
+                            </div>
 
-                    <button
-                      onClick={() => handleScenarioPreset('ble_proximity')}
-                      className="w-full p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-left hover:border-slate-700 transition-colors flex items-center justify-between group"
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-slate-200 group-hover:text-sky-400">
-                          3. Nearby BLE Smart Device
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-sans">
-                          Smartwatch / phone detected within -48 dBm RSSI.
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-sky-400 font-bold">
-                        55%
-                      </span>
-                    </button>
-
-                    <button
-                      onClick={() => handleScenarioPreset('elevated')}
-                      className="w-full p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-left hover:border-slate-700 transition-colors flex items-center justify-between group"
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-slate-200 group-hover:text-amber-400">
-                          4. Multi-Sensor Motion + Shadow Pass
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-sans">
-                          Sudden light occlusion + surface movement perturbation.
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-amber-400 font-bold">
-                        75%
-                      </span>
-                    </button>
-
-                    <button
-                      onClick={() => handleScenarioPreset('immediate_proximity')}
-                      className="w-full p-2.5 rounded-lg bg-slate-950/70 border border-rose-500/40 text-left hover:border-rose-500 transition-colors flex items-center justify-between group bg-rose-500/5"
-                    >
-                      <div>
-                        <div className="text-xs font-bold text-rose-300">
-                          5. Direct Hardware Proximity Trigger
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-sans">
-                          User hand directly covering phone sensor (&lt;5cm).
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold">
-                        95%
-                      </span>
-                    </button>
-                  </div>
+                            <div className="text-right">
+                              <div className="text-xs font-mono font-bold text-emerald-400">
+                                {blip.strength}% Conf
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-mono">
+                                {blip.contributingSensors?.length || 1} sensors
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center text-xs text-slate-500 bg-slate-950/40 rounded-xl">
+                      No active targets currently above noise threshold.
+                    </div>
+                  )}
                 </div>
-
-                {/* Selected Blip Detail Card */}
-                {selectedBlip && (
-                  <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs font-mono">
-                    <div className="flex items-center justify-between text-slate-300 font-bold mb-1">
-                      <span>Target: {selectedBlip.label}</span>
-                      <button
-                        onClick={() => setSelectedBlip(null)}
-                        className="text-slate-400 hover:text-slate-200"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 text-slate-400 text-[11px] mt-2">
-                      <div>Bearing: {selectedBlip.angle.toFixed(0)}°</div>
-                      <div>Dist: {(selectedBlip.distance * 2).toFixed(2)}m</div>
-                      <div>Signal: {selectedBlip.strength}%</div>
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 2: LIVE SENSOR READINGS & HARDWARE STIMULATOR */}
+        {/* TAB 2: MULTI-SENSOR LIVE TELEMETRY */}
         {activeTab === 'sensors' && (
-          <SensorPanel
-            readings={sensorReadings}
-            onTriggerSimulation={handleTriggerSimulation}
-            isMicActive={isMicActive}
-            onToggleMic={toggleMicrophone}
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  Hardware Sensor Telemetry & Sampling Streams
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Each sensor runs on an independent asynchronous polling loop with dedicated rolling ring buffers.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono text-slate-400">
+                  Power: <span className="text-emerald-400 font-bold">{powerBudget.estimatedPowerDrawMw} mW</span>
+                </span>
+              </div>
+            </div>
+
+            {/* Grid of 7 Distinct Sensor Modules */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {/* 1. Camera Sensor */}
+              <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-xs text-emerald-400">
+                    <Camera className="w-4 h-4" />
+                    <span>Camera + ML Vision</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                    8 FPS (Active)
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Primary deciding vote for human vs animal classification in front 68° optical field-of-view.
+                </p>
+                <div className="p-2.5 bg-slate-950 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                  <div>Targets: {cameraDetections.length}</div>
+                  <div>Primary: {cameraDetections[0]?.subClass || 'None'}</div>
+                  <div>Delegate: NNAPI / GPU INT8</div>
+                </div>
+              </div>
+
+              {/* 2. Acoustic Sensor */}
+              <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-xs text-purple-400">
+                    <Volume2 className="w-4 h-4" />
+                    <span>Acoustic Sonar & Mic</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                    44.1 kHz FFT
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  18.5–20.4 kHz active ultrasonic chirp ranging + passive footstep cadence detection (20–180Hz).
+                </p>
+                <div className="p-2.5 bg-slate-950 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                  <div>Cadence: {acousticData?.footstepCadenceDetected ? `${acousticData.footstepHz} Hz` : 'Quiet'}</div>
+                  <div>Pet Score: {acousticData?.animalVocalizationScore ?? 0}%</div>
+                  <div>Sonar Echo: {acousticData?.ultrasonicEchoDetected ? 'Locked (~1.4m)' : 'Baseline'}</div>
+                </div>
+              </div>
+
+              {/* 3. WiFi RSSI & RTT */}
+              <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-xs text-cyan-400">
+                    <Wifi className="w-4 h-4" />
+                    <span>WiFi Multipath & RTT</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                    {shizukuStatus.isEnabled ? '8 Hz (Shizuku)' : 'Throttled'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Multipath disturbance variance from moving bodies + 802.11mc Time-of-Flight ranging.
+                </p>
+                <div className="p-2.5 bg-slate-950 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                  <div>APs Tracked: 3 Access Points</div>
+                  <div>Disturbance: 4.8 dBm shift</div>
+                  <div>802.11mc RTT: Supported (±1.5m)</div>
+                </div>
+              </div>
+
+              {/* 4. BLE Proximity */}
+              <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-xs text-sky-400">
+                    <Activity className="w-4 h-4" />
+                    <span>BLE Beacon Proximity</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                    Low-Latency
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Near-field (1–5m) Bluetooth beacon signal tracking using log-distance path loss models.
+                </p>
+                <div className="p-2.5 bg-slate-950 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                  <div>Beacons: 2 detected</div>
+                  <div>Strongest: -68 dBm</div>
+                  <div>Tx Power Ref: -59 dBm @ 1m</div>
+                </div>
+              </div>
+
+              {/* 5. IMU Accelerometer & Gyro */}
+              <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-xs text-amber-400">
+                    <Activity className="w-4 h-4" />
+                    <span>IMU Motion & Vibration</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                    SENSOR_DELAY_GAME
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  High-frequency accelerometer & gyro monitoring surface vibrations and phone handling.
+                </p>
+                <div className="p-2.5 bg-slate-950 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                  <div>Motion Delta: 0.04 m/s²</div>
+                  <div>Surface Noise: 0.02 m/s²</div>
+                  <div>Handling State: Stationary (Desk)</div>
+                </div>
+              </div>
+
+              {/* 6. Magnetometer & Compass */}
+              <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 font-semibold text-xs text-rose-400">
+                    <Compass className="w-4 h-4" />
+                    <span>Magnetometer & Heading</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                    50 Hz
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Aligns the radar sweep coordinate frame to True North and senses moving ferrous masses.
+                </p>
+                <div className="p-2.5 bg-slate-950 rounded-xl text-xs font-mono text-slate-300 space-y-1">
+                  <div>Azimuth: {Math.round(compassHeading)}° North</div>
+                  <div>Magnetic Anomaly: 0.3 µT</div>
+                  <div>Calibrated: Yes (3-axis Hard Iron)</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB: CARRIED DEVICE SIGNAL ASSIST */}
+        {activeTab === 'carried_signals' && (
+          <CarriedDevicePanel />
+        )}
+
+        {/* TAB: HUMAN TARGET CALIBRATION STUDIO */}
+        {activeTab === 'calibration' && (
+          <HumanCalibrationStudio
+            config={fusionConfig}
+            onSaveProfile={handleSaveHumanProfile}
+            onClearProfile={handleClearHumanProfile}
+            onLaunchRadarTest={handleLaunchRadarTest}
+            currentCompassHeading={compassHeading}
           />
         )}
 
-        {/* TAB 3: CALIBRATION & WEIGHT TUNING */}
+        {/* TAB: SENSOR SOUNDBOARD STUDIO MIXING CONSOLE */}
+        {activeTab === 'soundboard' && (
+          <SensorSoundboard
+            config={fusionConfig}
+            presenceState={presenceState}
+            onChangeConfig={(newCfg) => {
+              setFusionConfig(newCfg);
+              bayesianFusionEngine.updateConfig(newCfg);
+            }}
+            onSimulate={handleModalSimulate}
+            onEmitChirp={handleEmitChirp}
+            compassHeading={compassHeading}
+          />
+        )}
+
+        {/* TAB 3: SETTINGS, FUSION CALIBRATION & SENSOR MICROMANAGEMENT */}
         {activeTab === 'settings' && (
           <SettingsPanel
             config={fusionConfig}
-            onChangeConfig={(newCfg) => setFusionConfig(newCfg)}
+            onChangeConfig={(newCfg) => {
+              setFusionConfig(newCfg);
+              bayesianFusionEngine.updateConfig(newCfg);
+            }}
+            onOpenMicromanageModal={() => setShowMicromanageModal(true)}
           />
         )}
 
-        {/* TAB 4: ANDROID SOURCE CODE VIEWER */}
+        {/* TAB 4: ANDROID & NDK C++ ARCHITECTURE VIEWER */}
         {activeTab === 'code' && (
           <AndroidCodeViewer />
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-900 mt-12 py-6 text-center text-xs text-slate-400 font-mono">
-        <div className="max-w-7xl mx-auto px-4 flex flex-wrap items-center justify-between gap-2">
-          <span>SensorRadar • Privacy-First Human Presence Estimator</span>
-          <span className="text-slate-400">Zero Camera Access • Pure Sensor Fusion</span>
+      {/* Sensor Micromanagement Tuning Modal */}
+      <SensorMicromanageModal
+        isOpen={showMicromanageModal}
+        onClose={() => setShowMicromanageModal(false)}
+        config={fusionConfig}
+        onChangeConfig={(newCfg) => {
+          setFusionConfig(newCfg);
+          bayesianFusionEngine.updateConfig(newCfg);
+        }}
+        onSimulate={handleModalSimulate}
+      />
+
+      {/* Detection Breakdown Modal when tapping a radar blip */}
+      <DetectionDetailModal
+        blip={selectedBlip}
+        onClose={() => setSelectedBlip(null)}
+      />
+
+      {/* Carried Devices Modal when invoked from Radar */}
+      {showCarriedDevicesModal && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150"
+          onClick={() => setShowCarriedDevicesModal(false)}
+        >
+          <div 
+            className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <CarriedDevicePanel onClose={() => setShowCarriedDevicesModal(false)} />
+          </div>
         </div>
-      </footer>
+      )}
+
+      {/* Hardware Reality Check Modal */}
+      <RealityCheckModal
+        isOpen={showRealityCheck}
+        onClose={() => setShowRealityCheck(false)}
+      />
+
+      {/* Shizuku Privileged Access Modal */}
+      <ShizukuPrivilegedModal
+        isOpen={showShizukuModal}
+        onClose={() => setShowShizukuModal(false)}
+        status={shizukuStatus}
+        onToggleShizuku={handleToggleShizuku}
+      />
     </div>
   );
 }
